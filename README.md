@@ -7,12 +7,13 @@ A responsive, pastel-colored web app for multi-page price schedule scanning and 
 - **Handwritten total present?** Compares with independently calculated total (Correct / Incorrect).
 - **Mixed document?** Checks present amounts and calculates missing ones, row by row.
 - Prices written as `amount per N` are normalized to a per-unit price; quantities written as `required N` are recognized even without a quantity column.
-- When a row contains multiple quoted prices, the lowest calculated per-unit price is selected before calculating the row total.
+- When a row contains prices from multiple suppliers, the lowest VAT-exclusive unit price is selected and the VAT-exclusive total is calculated separately as quantity × selected unit price. If VAT-exclusive quotes are unavailable, the lowest comparable VAT-inclusive unit price is selected.
 - **Uncertain/missing quantity or both VAT-inclusive and VAT-exclusive prices?** Flags the row as Needs review; does not invent totals.
 - When VAT-inclusive amounts are absent, uses the scanned VAT-exclusive unit prices and totals and reports a VAT-exclusive grand total without inventing a VAT rate.
+- Uses the scanned grand total's VAT basis when one is provided; when no grand total is given and every row has a calculated VAT-inclusive total, displays the VAT-inclusive total.
 - Verifies bottom-of-page grand totals separately and combines pages when all rows are complete.
 - Editable OCR fields, optional handwritten grand total, add/delete rows and pages, CSV export.
-- After scanning, an optional VAT multiplier prompt can calculate missing VAT-inclusive unit prices and totals from VAT-exclusive prices. Enter `1.18` (or `1.18%`) for an 18% VAT multiplier; skip it to show dashes for unavailable VAT-inclusive values.
+- After scanning, an optional VAT rate prompt can calculate VAT-inclusive bulk prices, unit prices and totals from VAT-exclusive prices, including VAT-inclusive row totals based on a supplied or calculated VAT-exclusive total. Enter `18` or `18%` for an 18% rate; `1.18` or `1.18%` means 1.18%. Skip it to retain scanned inclusive values and show dashes with a Not given badge where inclusive values were not scanned.
 
 **Important:** AI-based handwriting recognition is imperfect. A human must review ambiguous numerals. This is a verification aid, not certified accounting software. The application cannot guarantee every handwritten digit is extracted accurately.
 
@@ -57,6 +58,6 @@ Sample documents may be kept locally for manual testing, but the `samples/` dire
 ## API
 - `GET /api/health` — OCR setup status
 - `POST /api/scan` — multipart `files` (PDF or images); calls provider for OCR; returns independently verified amounts
-- `POST /api/calculate` — JSON `{"pages":[{"filename":"Page 1","rows":[{"item":"Item A","quantity":"50","unit_price_with_vat":"16200","document_total":"810000"}],"document_grand_total":"810000"}]}`; recalculates without needing OCR. For multiple detected tables, `vat_multipliers` accepts separate table-indexed values such as `{"0":"1.18","1":"1.20"}`.
+- `POST /api/calculate` — JSON `{"pages":[{"filename":"Page 1","rows":[{"item":"Item A","quantity":"50","unit_price_with_vat":"16200","document_total":"810000"}],"document_grand_total":"810000"}]}`; recalculates without needing OCR. `vat_multiplier` and the table-indexed `vat_multipliers` accept percentage rates with or without `%`, such as `18`, `18%`, `1.18`, or `1.18%`; the rate is applied as `exclusive amount × (1 + rate / 100)`.
 
-**Limitations:** Tables with merged cells, faint Sinhala handwriting, skewed photos or unusual pricing formats require review. PDF documents support up to 12 pages per request, max 16 MB per uploaded file. VAT is never inferred; it is only applied when the user supplies a multiplier. The status "Calculated" means the corresponding document value was blank or derived from the supplied VAT multiplier; pre-existing values are marked Correct or Incorrect.
+**Limitations:** Tables with merged cells, faint Sinhala handwriting, skewed photos or unusual pricing formats require review. PDF documents support up to 12 pages per request, max 16 MB per uploaded file. VAT is never inferred; it is only applied when the user supplies a rate. The status "Calculated" means the corresponding document value was blank or derived from the supplied VAT rate; pre-existing values are marked Correct or Incorrect.
