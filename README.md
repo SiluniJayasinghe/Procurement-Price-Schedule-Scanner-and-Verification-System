@@ -9,6 +9,7 @@ A responsive, pastel-colored web app for multi-page price schedule scanning and 
 - Prices written as `amount per N` are normalized to a per-unit price; quantities written as `required N` are recognized even without a quantity column.
 - When a row contains prices from multiple suppliers, the lowest VAT-exclusive unit price is selected and the VAT-exclusive total is calculated separately as quantity × selected unit price. If VAT-exclusive quotes are unavailable, the lowest comparable VAT-inclusive unit price is selected.
 - **Uncertain/missing quantity or both VAT-inclusive and VAT-exclusive prices?** Flags the row as Needs review; does not invent totals.
+- Rows without a calculable amount (shown as a dash / Not given) are excluded from page and overall sums; available rows are still totaled and the result remains marked Needs review.
 - When VAT-inclusive amounts are absent, uses the scanned VAT-exclusive unit prices and totals and reports a VAT-exclusive grand total without inventing a VAT rate.
 - Uses the scanned grand total's VAT basis when one is provided; when no grand total is given and every row has a calculated VAT-inclusive total, displays the VAT-inclusive total.
 - Verifies bottom-of-page grand totals separately and combines pages when all rows are complete.
