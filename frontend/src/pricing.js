@@ -12,6 +12,12 @@ const roundedPrice = (value, places = 2) => {
 
 export const pricePrecision = label => label.startsWith('Total incl VAT') || label.startsWith('Grand total given incl. VAT') ? 3 : 2;
 
+export const resolveBulkPriceWithVat = (draftValue, calculatedValue, isEdited) => (
+  isEdited && draftValue !== null && draftValue !== ''
+    ? draftValue
+    : calculatedValue ?? draftValue
+);
+
 export const getVatFactor = (row, rate) => {
   const rateText = String(rate ?? '').trim();
   if (rateText) {
@@ -37,6 +43,40 @@ export const updatePriceChain = (row, key, value, vatFactor) => {
   const amount = parsePrice(value);
   const quantity = parsePrice(row.quantity);
   const bulkQuantity = parsePrice(row.bulk_quantity);
+
+  if (key === 'bulk_quantity') {
+    const inclusiveBulk = parsePrice(row.bulk_price_with_vat);
+    const exclusiveBulk = parsePrice(row.bulk_price_without_vat);
+    const validBulkQuantity = amount !== null && amount > 0;
+    const hasVatFactor = vatFactor !== null && vatFactor > 0;
+    const rawUnitInclusive = exclusiveBulk !== null && hasVatFactor && validBulkQuantity
+        ? (exclusiveBulk / amount) * vatFactor
+        : inclusiveBulk !== null && validBulkQuantity
+          ? inclusiveBulk / amount
+          : null;
+    const rawUnitExclusive = exclusiveBulk !== null && validBulkQuantity
+      ? exclusiveBulk / amount
+      : inclusiveBulk !== null && hasVatFactor && validBulkQuantity
+        ? (inclusiveBulk / amount) / vatFactor
+        : null;
+    const unitInclusive = rawUnitInclusive === null ? null : Number(roundedPrice(rawUnitInclusive));
+    const unitExclusive = rawUnitExclusive === null ? null : Number(roundedPrice(rawUnitExclusive));
+    const updates = {};
+
+    if (inclusiveBulk !== null || (exclusiveBulk !== null && hasVatFactor)) {
+      updates.unit_price_with_vat = unitInclusive === null ? '' : roundedPrice(unitInclusive);
+      updates.document_total = unitInclusive === null || quantity === null
+        ? ''
+        : roundedPrice(unitInclusive * quantity, 3);
+    }
+    if (exclusiveBulk !== null || (inclusiveBulk !== null && hasVatFactor)) {
+      updates.unit_price_without_vat = unitExclusive === null ? '' : roundedPrice(unitExclusive);
+      updates.document_total_without_vat = unitExclusive === null || quantity === null
+        ? ''
+        : roundedPrice(unitExclusive * quantity);
+    }
+    return updates;
+  }
 
   if (key === 'bulk_price_without_vat') {
     const rawUnitExclusive = amount !== null && bulkQuantity > 0 ? amount / bulkQuantity : null;
@@ -92,6 +132,7 @@ export const updatePriceChain = (row, key, value, vatFactor) => {
 export const changedPriceFields = (key, updates) => [...new Set([key, ...Object.keys(updates)])];
 
 const trackedPriceFields = [
+  'bulk_quantity',
   'bulk_price_with_vat',
   'bulk_price_without_vat',
   'unit_price_with_vat',

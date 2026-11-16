@@ -1,5 +1,6 @@
 """Price Schedule Scanner: multimodal OCR assisted with exact Decimal arithmetic."""
 import base64
+import asyncio
 import io
 import json
 import os
@@ -45,12 +46,16 @@ def decimal_or_none(value):
 def price_per_unit(value):
     if not isinstance(value, str):
         return decimal_or_none(value)
-    numbers = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", value)
-    if re.search(r"\bper\b|\bfor\b", value, re.IGNORECASE) and len(numbers) >= 2:
-        amount = decimal_or_none(numbers[0])
-        units = decimal_or_none(numbers[1])
+    rate_marker = re.search(r"\b(per|for)\b", value, re.IGNORECASE)
+    if rate_marker:
+        before_marker = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", value[:rate_marker.start()])
+        after_marker = re.findall(r"\d+(?:,\d{3})*(?:\.\d+)?", value[rate_marker.end():])
+        amount = decimal_or_none(before_marker[-1]) if before_marker else None
+        units = decimal_or_none(after_marker[0]) if after_marker else None
         if amount is not None and units is not None and units > 0:
             return amount / units
+        if amount is not None:
+            return amount
     return decimal_or_none(value)
 
 def required_quantity(row):
@@ -109,7 +114,11 @@ def selected_quote(row, price_key):
 def pricing_details(row, factor):
     options = row.get("quote_options")
     edited_price_key = row.get("edited_price_key")
-    candidates = options if isinstance(options, list) and edited_price_key not in ("bulk_price_with_vat", "bulk_price_without_vat") else []
+    candidates = options if isinstance(options, list) and edited_price_key not in (
+        "bulk_quantity",
+        "bulk_price_with_vat",
+        "bulk_price_without_vat",
+    ) else []
     candidates = [row, *[option for option in candidates if isinstance(option, dict)]]
     normalized = []
     for index, option in enumerate(candidates):
@@ -214,7 +223,11 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
             bulk_quantity = decimal_or_none(row.get("bulk_quantity"))
             bulk_price_with_vat = decimal_or_none(row.get("bulk_price_with_vat"))
             bulk_price_without_vat = decimal_or_none(row.get("bulk_price_without_vat"))
-            provided_bulk_price_with_vat = bulk_price_with_vat
+            generated_price_fields = row.get("generated_price_fields")
+            generated_price_fields = generated_price_fields if isinstance(generated_price_fields, list) else []
+            provided_bulk_price_with_vat = (
+                None if "bulk_price_with_vat" in generated_price_fields else bulk_price_with_vat
+            )
             calculated_exclusive_unit_price = False
             used_bulk_pricing = bulk_pricing is not None and not preserve_direct_price
             if used_bulk_pricing:
@@ -261,8 +274,6 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
             ):
                 unit_price_with_vat = None
                 written_unit_price = None
-            generated_price_fields = row.get("generated_price_fields")
-            generated_price_fields = generated_price_fields if isinstance(generated_price_fields, list) else []
             provided_with_vat = None if "document_total" in generated_price_fields else decimal_or_none(row.get("document_total"))
             provided_without_vat = None if "document_total_without_vat" in generated_price_fields else decimal_or_none(row.get("document_total_without_vat"))
             valid_quantity = quantity is not None and quantity >= 0
@@ -320,13 +331,20 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 provided_inclusive_unit = written_unit_price
                 if not valid_inclusive_price and provided_bulk_price_with_vat is not None and bulk_quantity is not None and bulk_quantity > 0:
                     provided_inclusive_unit = provided_bulk_price_with_vat / bulk_quantity
-                if has_edited_exclusive_unit_price:
+                if "unit_price_with_vat" in generated_price_fields or has_edited_exclusive_unit_price:
                     inclusive_unit_status = "calculated"
                 elif provided_inclusive_unit is not None:
                     inclusive_unit_status = "correct" if abs(provided_inclusive_unit - derived_inclusive_price) <= MONEY else "incorrect"
                 else:
                     inclusive_unit_status = "calculated"
                 displayed_inclusive_price = calculated_inclusive_price
+            elif used_bulk_pricing and written_unit_price is not None:
+                inclusive_unit_status = (
+                    "calculated"
+                    if "unit_price_with_vat" in generated_price_fields
+                    else "correct" if abs(written_unit_price - calculated_inclusive_price) <= MONEY else "incorrect"
+                )
+                displayed_inclusive_price = written_unit_price
             inclusive_total_status = "not_given"
             if calculated_inclusive_total is not None:
                 inclusive_total_status = "calculated" if provided_with_vat is None else "correct" if provided_with_vat.quantize(INCLUSIVE_MONEY, rounding=ROUND_HALF_UP) == calculated_inclusive_total else "incorrect"
@@ -382,10 +400,21 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 "selected_quote_index": selected_quote_index,
                 "selected_quote_unit_price": fmt(selected_quote_unit_price),
                 "quote_selection_status": "calculated" if selected_quote_index is not None else "not_given",
-                "calculated_unit_price_with_vat": fmt(calculated_inclusive_price) if derived_inclusive_price is not None else None,
+                "calculated_unit_price_with_vat": fmt(calculated_inclusive_price) if (
+                    derived_inclusive_price is not None
+                    or (
+                        used_bulk_pricing
+                        and current_factor is not None
+                        and bulk_price_without_vat is not None
+                        and edited_price_key != "bulk_price_with_vat"
+                    )
+                ) else None,
                 "vat_rate_applied": current_factor is not None,
                 "unit_price_with_vat_status": inclusive_unit_status,
-                "unit_price_without_vat_status": "calculated" if calculated_exclusive_unit_price else "written_total" if valid_exclusive_price else "not_given",
+                "unit_price_without_vat_status": "calculated" if valid_exclusive_price and (
+                    calculated_exclusive_unit_price
+                    or "unit_price_without_vat" in generated_price_fields
+                ) else "written_total" if valid_exclusive_price else "not_given",
                 "calculation_basis": basis,
                 "calculated_total": fmt_inclusive(calculated_total) if basis == "vat_inclusive" else fmt(calculated_total),
                 "calculated_total_with_vat": fmt_inclusive(calculated_inclusive_total),

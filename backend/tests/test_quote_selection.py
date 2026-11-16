@@ -63,6 +63,7 @@ class QuoteSelectionTests(unittest.TestCase):
         self.assertIsNone(row["unit_price_with_vat"])
         self.assertEqual(row["unit_price_with_vat_status"], "not_given")
         self.assertEqual(row["unit_price_without_vat"], "2600.00")
+        self.assertEqual(row["unit_price_without_vat_status"], "written_total")
         self.assertEqual(row["calculated_total_without_vat"], "26000.00")
 
     def test_legacy_manual_inclusive_unit_price_remains_supported(self):
@@ -76,6 +77,82 @@ class QuoteSelectionTests(unittest.TestCase):
 
         row = result["pages"][0]["rows"][0]
         self.assertEqual(row["unit_price_with_vat"], "100.00")
+
+    def test_bulk_inclusive_unit_price_is_compared_with_written_per_unit_rate(self):
+        cases = [
+            ("1,401.90 per Ltr", "correct", "1401.90"),
+            ("1,402.10 per Ltr", "incorrect", "1402.10"),
+            ("294,400.00 (1,401.90 per Ltr)", "correct", "1401.90"),
+        ]
+
+        for written_price, expected_status, expected_price in cases:
+            with self.subTest(written_price=written_price):
+                result = verify([{
+                    "rows": [{
+                        "item": "Gear box oil",
+                        "quantity": "16670",
+                        "bulk_quantity": "210",
+                        "bulk_price_with_vat": "294400",
+                        "unit_price_with_vat": written_price,
+                    }],
+                }])
+
+                row = result["pages"][0]["rows"][0]
+                self.assertEqual(row["unit_price_with_vat"], expected_price)
+                self.assertEqual(row["unit_price_with_vat_status"], expected_status)
+
+    def test_edited_bulk_quantity_uses_the_row_not_another_quote_option(self):
+        result = verify([{
+            "rows": [{
+                "quantity": "2",
+                "bulk_quantity": "2",
+                "bulk_price_with_vat": "120",
+                "bulk_price_without_vat": "100",
+                "unit_price_with_vat": "60",
+                "unit_price_without_vat": "50",
+                "edited_price_key": "bulk_quantity",
+                "edited_price_keys": ["bulk_quantity"],
+                "generated_price_fields": [
+                    "unit_price_with_vat",
+                    "document_total",
+                    "unit_price_without_vat",
+                    "document_total_without_vat",
+                ],
+                "quote_options": [{
+                    "bulk_quantity": "10",
+                    "bulk_price_with_vat": "50",
+                    "bulk_price_without_vat": "40",
+                }],
+            }],
+        }])
+
+        row = result["pages"][0]["rows"][0]
+        self.assertEqual(row["unit_price_with_vat"], "60.00")
+        self.assertEqual(row["calculated_total_with_vat"], "120.000")
+        self.assertEqual(row["unit_price_without_vat"], "50.00")
+        self.assertEqual(row["calculated_total_without_vat"], "100.00")
+        self.assertEqual(row["unit_price_with_vat_status"], "calculated")
+
+    def test_generated_exclusive_unit_price_is_marked_calculated(self):
+        result = verify([{
+            "rows": [{
+                "quantity": "2",
+                "bulk_quantity": "2",
+                "bulk_price_with_vat": "120",
+                "unit_price_with_vat": "60",
+                "unit_price_without_vat": "50",
+                "edited_price_key": "bulk_quantity",
+                "edited_price_keys": ["bulk_quantity"],
+                "generated_price_fields": [
+                    "unit_price_without_vat",
+                    "document_total",
+                    "document_total_without_vat",
+                ],
+            }],
+        }], vat_multiplier="20")
+
+        row = result["pages"][0]["rows"][0]
+        self.assertEqual(row["unit_price_without_vat_status"], "calculated")
 
     def test_given_vat_exclusive_totals_get_correct_or_incorrect_status_across_scan_paths(self):
         cases = [
@@ -273,6 +350,34 @@ class QuoteSelectionTests(unittest.TestCase):
         self.assertEqual(row["unit_price_with_vat"], "16200.00")
         self.assertEqual(row["calculated_total_with_vat"], "32400.000")
 
+    def test_vat_rate_updates_calculated_unit_price_for_bulk_and_direct_pricing(self):
+        cases = [
+            {
+                "quantity": "2",
+                "bulk_quantity": "10",
+                "bulk_price_with_vat": "118",
+                "bulk_price_without_vat": "100",
+                "unit_price_with_vat": "11.80",
+                "unit_price_without_vat": "10.00",
+            },
+            {
+                "quantity": "2",
+                "unit_price_with_vat": "118",
+                "unit_price_without_vat": "100",
+            },
+        ]
+
+        for row_input in cases:
+            with self.subTest(row_input=row_input):
+                result = verify(
+                    [{"rows": [row_input]}],
+                    vat_multiplier="20",
+                )
+
+                row = result["pages"][0]["rows"][0]
+                self.assertEqual(row["calculated_unit_price_with_vat"], "12.00" if "bulk_quantity" in row_input else "120.00")
+                self.assertEqual(row["unit_price_with_vat_status"], "incorrect")
+
     def test_bulk_totals_use_rounded_display_unit_prices(self):
         result = verify([{
             "rows": [{
@@ -316,6 +421,21 @@ class QuoteSelectionTests(unittest.TestCase):
         self.assertEqual(row["bulk_price_with_vat_status"], "calculated")
         self.assertEqual(row["document_total_status"], "calculated")
         self.assertEqual(row["document_total_without_vat_status"], "calculated")
+
+    def test_bulk_inclusive_price_without_bulk_quantity_is_calculated_when_generated(self):
+        result = verify([{
+            "rows": [{
+                "quantity": "2",
+                "bulk_price_without_vat": "100",
+                "bulk_price_with_vat": "118",
+                "edited_price_key": "bulk_price_without_vat",
+                "generated_price_fields": ["bulk_price_with_vat"],
+            }],
+        }], vat_multiplier="18")
+
+        row = result["pages"][0]["rows"][0]
+        self.assertEqual(row["bulk_price_with_vat"], "118.00")
+        self.assertEqual(row["bulk_price_with_vat_status"], "calculated")
 
 
 if __name__ == "__main__":
