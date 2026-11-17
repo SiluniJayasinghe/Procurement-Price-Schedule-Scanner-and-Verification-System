@@ -75,6 +75,13 @@ export const updatePriceChain = (row, key, value, vatFactor) => {
         ? ''
         : roundedPrice(unitExclusive * quantity);
     }
+    if (
+      exclusiveBulk !== null
+      && hasVatFactor
+      && row.generated_price_fields?.includes('bulk_price_with_vat')
+    ) {
+      updates.bulk_price_with_vat = roundedPrice(exclusiveBulk * vatFactor);
+    }
     return updates;
   }
 

@@ -39,6 +39,30 @@ test('changing bulk quantity derives the other unit price from the VAT factor', 
   });
 });
 
+test('changing VAT recalculates a generated inclusive bulk price when bulk quantity was edited last', () => {
+  const updates = updatePriceChain({
+    quantity: '3',
+    bulk_quantity: '10',
+    bulk_price_with_vat: '118.00',
+    bulk_price_without_vat: '100',
+    generated_price_fields: ['bulk_price_with_vat'],
+  }, 'bulk_quantity', '10', 1.2);
+
+  assert.equal(updates.bulk_price_with_vat, '120.00');
+  assert.equal(updates.unit_price_with_vat, '12.00');
+  assert.equal(updates.unit_price_without_vat, '10.00');
+});
+
+test('changing bulk quantity preserves a manually entered inclusive bulk price', () => {
+  const updates = updatePriceChain({
+    quantity: '3',
+    bulk_price_with_vat: '125',
+    bulk_price_without_vat: '100',
+  }, 'bulk_quantity', '10', 1.2);
+
+  assert.equal(Object.hasOwn(updates, 'bulk_price_with_vat'), false);
+});
+
 test('a non-positive bulk quantity clears package-derived prices and totals', () => {
   const updates = updatePriceChain({
     quantity: '2',
