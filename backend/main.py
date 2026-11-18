@@ -22,7 +22,43 @@ origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173
 app.add_middleware(CORSMiddleware, allow_origins=[s.strip() for s in origins], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 MAX_FILE = 16 * 1024 * 1024
 MAX_PAGES = 12
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+DEFAULT_MODELS = ("gemini-3.6-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite")
+
+def configured_models() -> list[str]:
+    models: list[str] = []
+    for env_name in ("GEMINI_MODELS", "GEMINI_MODEL", "GEMINI_FALLBACK_MODELS"):
+        raw = os.getenv(env_name, "")
+        for part in raw.split(","):
+            cleaned = part.strip().strip("\"'")
+            if cleaned and cleaned not in models:
+                models.append(cleaned)
+    for default_model in DEFAULT_MODELS:
+        if default_model not in models:
+            models.append(default_model)
+    return models
+
+def configured_api_keys(explicit_keys: str | list[str] | tuple[str, ...] | None = None) -> list[str]:
+    keys: list[str] = []
+    def add_raw(raw_val):
+        if not raw_val:
+            return
+        if isinstance(raw_val, (list, tuple)):
+            for item in raw_val:
+                add_raw(item)
+            return
+        for part in str(raw_val).split(","):
+            cleaned = part.strip().strip("\"'")
+            if cleaned and cleaned not in keys:
+                keys.append(cleaned)
+    if explicit_keys is not None:
+        add_raw(explicit_keys)
+    add_raw(os.getenv("GEMINI_API_KEYS", ""))
+    for idx in range(1, 10):
+        add_raw(os.getenv(f"GEMINI_API_KEY_{idx}", ""))
+    add_raw(os.getenv("GEMINI_API_KEY", ""))
+    return keys
+
+MODEL = configured_models()[0]
 MONEY = Decimal("0.01")
 INCLUSIVE_MONEY = Decimal("0.001")
 
@@ -542,7 +578,15 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "ocr_configured": bool(os.getenv("GEMINI_API_KEY")), "model": MODEL}
+    models = configured_models()
+    keys = configured_api_keys()
+    return {
+        "ok": True,
+        "ocr_configured": bool(keys),
+        "model": models[0],
+        "models": models,
+        "api_keys_configured": len(keys),
+    }
 
 @app.post("/api/calculate")
 def calculate(data: CheckRequest):
@@ -584,12 +628,11 @@ def convert_to_images(blob: bytes, filename: str):
 
 PROMPT = """You extract financial tables from scanned Sinhala/English price schedules. Printed AND handwritten digits are important. Read carefully, including handwritten row totals and page grand totals. For each document row extract item/reference as 'item', numeric quantity as 'quantity', VAT-inclusive unit price as 'unit_price_with_vat', VAT-exclusive unit price as 'unit_price_without_vat', VAT-inclusive line total as 'document_total', and VAT-exclusive line total as 'document_total_without_vat'. Carefully read and understand every Sinhala or English column header, subheader, label, and note to determine whether each monetary column is VAT-inclusive or VAT-exclusive. Do not infer VAT status from column position, number size, arithmetic, or a fixed document layout; different documents may arrange these columns differently. Map each value according to the meaning of its own header, and if a header is unreadable or the VAT status is ambiguous, output null for that field and add a warning instead of swapping or guessing. If one item row has prices under multiple supplier/bidder columns, treat each supplier's offer as a separate quote_options entry. Preserve the supplier or manufacturer name in that quote's 'supplier' field when visible. Read each supplier's own VAT-exclusive unit price from its VAT-exclusive unit-price column; do not mistake a supplier's unit price for the row total, and do not combine prices from different suppliers. When quote_options are present, keep the row-level unit-price fields null rather than copying one supplier's offer into them. If a pricing is sold in a bulk/package amount, extract its package count as 'bulk_quantity', package amount including VAT as 'bulk_price_with_vat', and package amount excluding VAT as 'bulk_price_without_vat'. If the document gives a quote's unit price directly, preserve it as 'unit_price_with_vat' or 'unit_price_without_vat' inside that quote; do NOT divide a direct unit price by the row quantity. If the document says 'required N' or similar instead of using a quantity column, put N in 'quantity' and also preserve the source phrase in 'quantity_text'. If a row contains two or more quoted pricings, put every pricing in 'quote_options'. For each quote, use direct 'unit_price_with_vat'/'unit_price_without_vat' when printed; otherwise use 'bulk_quantity' with 'bulk_price_with_vat'/'bulk_price_without_vat' when a package total is printed. The verifier selects the lowest VAT-exclusive unit price when those quotes are available; otherwise it selects the lowest comparable VAT-inclusive unit price. For package quotes, compare package price divided by package quantity on the same VAT basis. It then calculates the row's total without VAT as item quantity times the selected VAT-exclusive unit price. Do not select or calculate OCR values yourself. Group nested pricing lines under the parent item. Extract VAT-inclusive and VAT-exclusive bottom-of-page grand totals as 'document_grand_total' and 'document_grand_total_without_vat'. Preserve visible written amounts even if mathematically wrong. NEVER fill blank printed fields or calculate OCR values yourself. If uncertain, output null for that value and add a short note in 'warnings'. Extract every item row; avoid summary/header rows.Return only strict JSON object of format {"rows":[{"item":"...","quantity":"50","quantity_text":null,"bulk_quantity":null,"bulk_price_with_vat":null,"bulk_price_without_vat":null,"unit_price_with_vat":null,"unit_price_without_vat":null,"document_total":null,"document_total_without_vat":null,"quote_options":[{"supplier":"Supplier A","unit_price_with_vat":"125.00","unit_price_without_vat":"100.00","bulk_quantity":null,"bulk_price_with_vat":null,"bulk_price_without_vat":null}],"warnings":[]}],"document_grand_total":"6625000.00","document_grand_total_without_vat":null,"warnings":[]}. Numeric strings contain no commas or currency symbols. A missing field must be null. No Markdown. OCR uncertainty should be flagged in warnings; do not invent unreadable digits. For every row, include boolean 'unit_price_with_vat_present': true only if the schedule visibly has a VAT-inclusive unit price and a value is printed for that item. If the schedule has only VAT-exclusive unit-price columns, set this to false and set unit_price_with_vat to null, even if a number appears elsewhere. Do not infer an inclusive amount from an exclusive amount."""
 
-async def recognize_image(image_bytes: bytes, api_key: str):
-    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
-    body = {"contents": [{"parts": [{"text": PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode("ascii")}}]}], "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
+async def _recognize_image_once(client: httpx.AsyncClient, image_b64: str, model: str, api_key: str):
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    body = {"contents": [{"parts": [{"text": PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}]}], "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
     try:
-        async with httpx.AsyncClient(timeout=115) as client:
-            response = await client.post(endpoint, params={"key": api_key}, json=body)
+        response = await client.post(endpoint, params={"key": api_key}, json=body)
         if response.status_code != 200:
             raise HTTPException(502, "OCR provider rejected the request. Check API key, model, quota and billing. Detail: " + response.text[:300])
         result = response.json()
@@ -621,11 +664,34 @@ async def recognize_image(image_bytes: bytes, api_key: str):
         detail = str(exc).strip() or "The OCR response was empty or not valid JSON."
         raise HTTPException(502, "OCR failed or returned invalid data: " + detail[:220]) from exc
 
+async def recognize_image(
+    image_bytes: bytes,
+    api_key: str | list[str] | tuple[str, ...] | None = None,
+    models: list[str] | tuple[str, ...] | None = None,
+):
+    keys_to_try = configured_api_keys(api_key)
+    if not keys_to_try:
+        raise HTTPException(503, "OCR is not configured. Add GEMINI_API_KEYS or GEMINI_API_KEY to backend/.env, or use manual entry.")
+    models_to_try = list(models) if models else configured_models()
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    last_exc: HTTPException | None = None
+    async with httpx.AsyncClient(timeout=115) as client:
+        for model in models_to_try:
+            for key in keys_to_try:
+                try:
+                    return await _recognize_image_once(client, image_b64, model, key)
+                except HTTPException as exc:
+                    last_exc = exc
+                    continue
+    if last_exc is not None:
+        raise last_exc
+    raise HTTPException(502, "OCR failed across all configured models and API keys.")
+
 @app.post("/api/scan")
 async def scan(files: list[UploadFile] = File(...)):
-    api_key = os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
-        raise HTTPException(503, "OCR is not configured. Add GEMINI_API_KEY to backend/.env, or use manual entry.")
+    api_keys = configured_api_keys()
+    if not api_keys:
+        raise HTTPException(503, "OCR is not configured. Add GEMINI_API_KEYS or GEMINI_API_KEY to backend/.env, or use manual entry.")
     if not files or len(files) > MAX_PAGES:
         raise HTTPException(400, f"Upload 1–{MAX_PAGES} files")
     pages = []
@@ -638,6 +704,6 @@ async def scan(files: list[UploadFile] = File(...)):
         for image in convert_to_images(data, f.filename):
             if len(pages) >= MAX_PAGES:
                 raise HTTPException(400, f"Maximum {MAX_PAGES} pages per scan")
-            recognized = await recognize_image(image, api_key)
+            recognized = await recognize_image(image, api_keys)
             pages.append({"filename": f.filename, **recognized})
     return verify(pages)
