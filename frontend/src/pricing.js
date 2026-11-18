@@ -50,10 +50,10 @@ export const updatePriceChain = (row, key, value, vatFactor) => {
     const validBulkQuantity = amount !== null && amount > 0;
     const hasVatFactor = vatFactor !== null && vatFactor > 0;
     const rawUnitInclusive = exclusiveBulk !== null && hasVatFactor && validBulkQuantity
-        ? (exclusiveBulk / amount) * vatFactor
-        : inclusiveBulk !== null && validBulkQuantity
-          ? inclusiveBulk / amount
-          : null;
+      ? (exclusiveBulk / amount) * vatFactor
+      : inclusiveBulk !== null && validBulkQuantity
+        ? inclusiveBulk / amount
+        : null;
     const rawUnitExclusive = exclusiveBulk !== null && validBulkQuantity
       ? exclusiveBulk / amount
       : inclusiveBulk !== null && hasVatFactor && validBulkQuantity
@@ -162,14 +162,24 @@ const samePriceValue = (left, right) => {
   return String(left ?? '').trim() === String(right ?? '').trim();
 };
 
-export const editPriceRow = (row, key, value, vatFactor) => {
+export const editPriceRow = (row, key, value, vatFactor, displayedValue) => {
   const originalValues = row.original_price_values || captureOriginalPriceValues(row);
   const editedKeys = [...(row.edited_price_keys || (row.edited_price_key ? [row.edited_price_key] : []))];
   const originalValue = originalValues[key];
-  const nextEditedKeys = samePriceValue(value, originalValue)
+  // When a field shows a recalculated value (e.g. 16,400.01 derived from the
+  // VAT-exclusive price) instead of the scanned value (16,400.00), typing the
+  // scanned value must still count as an edit. Remember what was displayed so
+  // only re-entering that displayed value reverts the field to automatic.
+  const displayedValues = { ...(row.displayed_price_values || {}) };
+  if (!editedKeys.includes(key) && displayedValue !== undefined) {
+    if (samePriceValue(displayedValue, originalValue)) delete displayedValues[key];
+    else displayedValues[key] = displayedValue;
+  }
+  const baselineValue = key in displayedValues ? displayedValues[key] : originalValue;
+  const nextEditedKeys = samePriceValue(value, baselineValue)
     ? editedKeys.filter(editedKey => editedKey !== key)
     : [...editedKeys.filter(editedKey => editedKey !== key), key];
-  const restored = { ...row, ...originalValues, original_price_values: originalValues };
+  const restored = { ...row, ...originalValues, original_price_values: originalValues, displayed_price_values: displayedValues };
   const editedFields = new Set();
   const generatedFields = new Set();
 

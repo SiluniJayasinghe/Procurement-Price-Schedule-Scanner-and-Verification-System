@@ -145,6 +145,9 @@ def fmt(value):
 def fmt_inclusive(value):
     return str(value.quantize(INCLUSIVE_MONEY, rounding=ROUND_HALF_UP)) if value is not None else None
 
+def same_money_amount(left, right):
+    return left.quantize(MONEY, rounding=ROUND_HALF_UP) == right.quantize(MONEY, rounding=ROUND_HALF_UP)
+
 def fmt_quantity(value):
     return str(value) if value is not None else None
 
@@ -163,6 +166,19 @@ def vat_factor(value):
     if not parsed.is_finite() or parsed < 0:
         return None
     return Decimal("1") + parsed / Decimal("100")
+
+def row_count_status(row):
+    """Status used for the summary cards.
+
+    A VAT-inclusive row total derived from VAT-exclusive values (multiplied by the
+    VAT rate) while the document's inclusive total was blank is a newly calculated
+    figure, so it counts as "calculated" instead of "correct"/"written_total".
+    Rows with an incorrect total stay "incorrect" so errors are never hidden.
+    """
+    status = row.get("status")
+    if row.get("inclusive_total_from_exclusive") and status in ("correct", "written_total", "calculated"):
+        return "calculated"
+    return status
 
 def verify(pages, vat_multiplier=None, vat_multipliers=None):
     output = []
@@ -212,8 +228,14 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
             written_unit_price = price_per_unit(row.get("unit_price_with_vat"))
             bulk_pricing = pricing_details(row, current_factor)
             preserve_direct_price = edited_price_key in ("unit_price_with_vat", "unit_price_without_vat")
-            inclusive_quote = None if preserve_direct_price else selected_quote(row, "unit_price_with_vat")
-            exclusive_quote = None if preserve_direct_price else selected_quote(row, "unit_price_without_vat")
+            # A manually entered bulk price replaces the scanned supplier quotes,
+            # mirroring pricing_details(), so stale quote prices are not reused.
+            manual_bulk_price = edited_price_key in ("bulk_price_with_vat", "bulk_price_without_vat") or (
+                isinstance(edited_price_keys, list)
+                and any(key in edited_price_keys for key in ("bulk_price_with_vat", "bulk_price_without_vat"))
+            )
+            inclusive_quote = None if preserve_direct_price or manual_bulk_price else selected_quote(row, "unit_price_with_vat")
+            exclusive_quote = None if preserve_direct_price or manual_bulk_price else selected_quote(row, "unit_price_without_vat")
             unit_price_with_vat = price_per_unit(row.get("unit_price_with_vat"))
             unit_price_without_vat = price_per_unit(row.get("unit_price_without_vat"))
             selected_quote_index = None
@@ -300,6 +322,14 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 else inclusive_price_source
             )
             exclusive_total_for_vat = calculated_exclusive_total if calculated_exclusive_total is not None else provided_without_vat
+            # Tracks whether the VAT-inclusive row total was derived from VAT-exclusive
+            # values (unit price, bulk price or row total) multiplied by the VAT rate.
+            inclusive_from_exclusive = derived_inclusive_price is not None or (
+                used_bulk_pricing
+                and current_factor is not None
+                and bulk_price_without_vat is not None
+                and edited_price_key != "bulk_price_with_vat"
+            )
             if (
                 edited_price_key in ("bulk_price_without_vat", "bulk_price_with_vat", "unit_price_with_vat", "unit_price_without_vat")
                 or derived_inclusive_price is not None
@@ -313,6 +343,7 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 )
             elif exclusive_total_for_vat is not None and current_factor is not None:
                 calculated_inclusive_total = (exclusive_total_for_vat * current_factor).quantize(INCLUSIVE_MONEY, rounding=ROUND_HALF_UP)
+                inclusive_from_exclusive = True
             elif valid_quantity and inclusive_total_price is not None:
                 calculated_inclusive_total = (quantity * inclusive_total_price).quantize(INCLUSIVE_MONEY, rounding=ROUND_HALF_UP)
             else:
@@ -324,7 +355,7 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 elif provided_bulk_price_with_vat is None:
                     bulk_price_status = "calculated"
                 else:
-                    bulk_price_status = "correct" if abs(provided_bulk_price_with_vat - bulk_price_with_vat) <= MONEY else "incorrect"
+                    bulk_price_status = "correct" if same_money_amount(provided_bulk_price_with_vat, bulk_price_with_vat) else "incorrect"
             inclusive_unit_status = "written_total" if valid_inclusive_price else "not_given"
             displayed_inclusive_price = unit_price_with_vat
             if derived_inclusive_price is not None:
@@ -334,7 +365,7 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 if "unit_price_with_vat" in generated_price_fields or has_edited_exclusive_unit_price:
                     inclusive_unit_status = "calculated"
                 elif provided_inclusive_unit is not None:
-                    inclusive_unit_status = "correct" if abs(provided_inclusive_unit - derived_inclusive_price) <= MONEY else "incorrect"
+                    inclusive_unit_status = "correct" if same_money_amount(provided_inclusive_unit, derived_inclusive_price) else "incorrect"
                 else:
                     inclusive_unit_status = "calculated"
                 displayed_inclusive_price = calculated_inclusive_price
@@ -342,7 +373,7 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 inclusive_unit_status = (
                     "calculated"
                     if "unit_price_with_vat" in generated_price_fields
-                    else "correct" if abs(written_unit_price - calculated_inclusive_price) <= MONEY else "incorrect"
+                    else "correct" if same_money_amount(written_unit_price, calculated_inclusive_price) else "incorrect"
                 )
                 displayed_inclusive_price = written_unit_price
             inclusive_total_status = "not_given"
@@ -424,6 +455,11 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
                 "difference": (fmt_inclusive(calculated_total-provided) if basis == "vat_inclusive" else fmt(calculated_total-provided)) if calculated_total is not None and provided is not None else None,
                 "difference_with_vat": fmt_inclusive(calculated_inclusive_total-provided_with_vat) if calculated_inclusive_total is not None and provided_with_vat is not None else None,
                 "difference_without_vat": fmt(calculated_exclusive_total-provided_without_vat) if calculated_exclusive_total is not None and provided_without_vat is not None else None,
+                "inclusive_total_from_exclusive": bool(
+                    inclusive_from_exclusive
+                    and calculated_inclusive_total is not None
+                    and provided_with_vat is None
+                ),
                 "status": status})
         if not rows_out:
             complete = False
@@ -486,7 +522,7 @@ def verify(pages, vat_multiplier=None, vat_multipliers=None):
         recorded = recorded_with_vat if uses_inclusive_total else recorded_without_vat
         group_precision = INCLUSIVE_MONEY if uses_inclusive_total else MONEY
         group_status = "needs_review" if not group_complete else "calculated" if recorded is None else "correct" if recorded.quantize(group_precision, rounding=ROUND_HALF_UP) == group_total.quantize(group_precision, rounding=ROUND_HALF_UP) else "incorrect"
-        group_result = {"table_group_index": group_index, "table_group_spans_pages": end > start, "table_group_requires_vat": any(decimal_or_none(row.get("unit_price_without_vat")) is not None for row in group_rows), "table_group_overall_total": (fmt_inclusive(group_total) if uses_inclusive_total else fmt(group_total)) if group_has_calculated_totals else None, "table_group_document_grand_total": fmt_inclusive(recorded) if uses_inclusive_total else fmt(recorded), "table_group_grand_total_difference": (fmt_inclusive(group_total - recorded) if uses_inclusive_total else fmt(group_total - recorded)) if group_complete and recorded is not None else None, "table_group_grand_total_status": group_status, "table_group_calculation_basis": "vat_inclusive" if uses_inclusive_total else "vat_exclusive" if recorded_without_vat is not None else None, "table_group_row_counts": {"correct": sum(row["status"] == "correct" for row in group_rows), "incorrect": sum(row["status"] == "incorrect" for row in group_rows), "calculated": sum(row["status"] == "calculated" for row in group_rows), "written_total": sum(row["status"] == "written_total" for row in group_rows), "needs_review": sum(row["status"] == "needs_review" for row in group_rows)}}
+        group_result = {"table_group_index": group_index, "table_group_spans_pages": end > start, "table_group_requires_vat": any(decimal_or_none(row.get("unit_price_without_vat")) is not None for row in group_rows), "table_group_overall_total": (fmt_inclusive(group_total) if uses_inclusive_total else fmt(group_total)) if group_has_calculated_totals else None, "table_group_document_grand_total": fmt_inclusive(recorded) if uses_inclusive_total else fmt(recorded), "table_group_grand_total_difference": (fmt_inclusive(group_total - recorded) if uses_inclusive_total else fmt(group_total - recorded)) if group_complete and recorded is not None else None, "table_group_grand_total_status": group_status, "table_group_calculation_basis": "vat_inclusive" if uses_inclusive_total else "vat_exclusive" if recorded_without_vat is not None else None, "table_group_row_counts": {"correct": sum(row_count_status(row) == "correct" for row in group_rows), "incorrect": sum(row_count_status(row) == "incorrect" for row in group_rows), "calculated": sum(row_count_status(row) == "calculated" for row in group_rows), "written_total": sum(row_count_status(row) == "written_total" for row in group_rows), "needs_review": sum(row_count_status(row) == "needs_review" for row in group_rows)}}
         group_results.append(group_result)
         for page_index in range(start, end + 1):
             output[page_index].update(group_result)
@@ -546,7 +582,7 @@ def convert_to_images(blob: bytes, filename: str):
             raise HTTPException(400, "Unsupported or invalid image") from exc
     return images
 
-PROMPT = """You extract financial tables from scanned Sinhala/English price schedules. Printed AND handwritten digits are important. Read carefully, including handwritten row totals and page grand totals. For each document row extract item/reference as 'item', numeric quantity as 'quantity', VAT-inclusive unit price as 'unit_price_with_vat', VAT-exclusive unit price as 'unit_price_without_vat', VAT-inclusive line total as 'document_total', and VAT-exclusive line total as 'document_total_without_vat'. Carefully read and understand every Sinhala or English column header, subheader, label, and note to determine whether each monetary column is VAT-inclusive or VAT-exclusive. Do not infer VAT status from column position, number size, arithmetic, or a fixed document layout; different documents may arrange these columns differently. Map each value according to the meaning of its own header, and if a header is unreadable or the VAT status is ambiguous, output null for that field and add a warning instead of swapping or guessing. If one item row has prices under multiple supplier/bidder columns, treat each supplier's offer as a separate quote_options entry. Preserve the supplier or manufacturer name in that quote's 'supplier' field when visible. Read each supplier's own VAT-exclusive unit price from its VAT-exclusive unit-price column; do not mistake a supplier's unit price for the row total, and do not combine prices from different suppliers. When quote_options are present, keep the row-level unit-price fields null rather than copying one supplier's offer into them. If a pricing is sold in a bulk/package amount, extract its package count as 'bulk_quantity', package amount including VAT as 'bulk_price_with_vat', and package amount excluding VAT as 'bulk_price_without_vat'. If the document gives a quote's unit price directly, preserve it as 'unit_price_with_vat' or 'unit_price_without_vat' inside that quote; do NOT divide a direct unit price by the row quantity. If the document says 'required N' or similar instead of using a quantity column, put N in 'quantity' and also preserve the source phrase in 'quantity_text'. If a row contains two or more quoted pricings, put every pricing in 'quote_options'. For each quote, use direct 'unit_price_with_vat'/'unit_price_without_vat' when printed; otherwise use 'bulk_quantity' with 'bulk_price_with_vat'/'bulk_price_without_vat' when a package total is printed. The verifier selects the lowest VAT-exclusive unit price when those quotes are available; otherwise it selects the lowest comparable VAT-inclusive unit price. For package quotes, compare package price divided by package quantity on the same VAT basis. It then calculates the row's total without VAT as item quantity times the selected VAT-exclusive unit price. Do not select or calculate OCR values yourself. Group nested pricing lines under the parent item. Extract VAT-inclusive and VAT-exclusive bottom-of-page grand totals as 'document_grand_total' and 'document_grand_total_without_vat'. Preserve visible written amounts even if mathematically wrong. NEVER fill blank printed fields or calculate OCR values yourself. If uncertain, output null for that value and add a short note in 'warnings'. Extract every item row; avoid summary/header rows. Return only strict JSON object of format {"rows":[{"item":"...","quantity":"50","quantity_text":null,"bulk_quantity":null,"bulk_price_with_vat":null,"bulk_price_without_vat":null,"unit_price_with_vat":null,"unit_price_without_vat":null,"document_total":null,"document_total_without_vat":null,"quote_options":[{"supplier":"Supplier A","unit_price_with_vat":"125.00","unit_price_without_vat":"100.00","bulk_quantity":null,"bulk_price_with_vat":null,"bulk_price_without_vat":null}],"warnings":[]}],"document_grand_total":"6625000.00","document_grand_total_without_vat":null,"warnings":[]}. Numeric strings contain no commas or currency symbols. A missing field must be null. No Markdown. OCR uncertainty should be flagged in warnings; do not invent unreadable digits. For every row, include boolean 'unit_price_with_vat_present': true only if the schedule visibly has a VAT-inclusive unit price and a value is printed for that item. If the schedule has only VAT-exclusive unit-price columns, set this to false and set unit_price_with_vat to null, even if a number appears elsewhere. Do not infer an inclusive amount from an exclusive amount."""
+PROMPT = """You extract financial tables from scanned Sinhala/English price schedules. Printed AND handwritten digits are important. Read carefully, including handwritten row totals and page grand totals. For each document row extract item/reference as 'item', numeric quantity as 'quantity', VAT-inclusive unit price as 'unit_price_with_vat', VAT-exclusive unit price as 'unit_price_without_vat', VAT-inclusive line total as 'document_total', and VAT-exclusive line total as 'document_total_without_vat'. Carefully read and understand every Sinhala or English column header, subheader, label, and note to determine whether each monetary column is VAT-inclusive or VAT-exclusive. Do not infer VAT status from column position, number size, arithmetic, or a fixed document layout; different documents may arrange these columns differently. Map each value according to the meaning of its own header, and if a header is unreadable or the VAT status is ambiguous, output null for that field and add a warning instead of swapping or guessing. If one item row has prices under multiple supplier/bidder columns, treat each supplier's offer as a separate quote_options entry. Preserve the supplier or manufacturer name in that quote's 'supplier' field when visible. Read each supplier's own VAT-exclusive unit price from its VAT-exclusive unit-price column; do not mistake a supplier's unit price for the row total, and do not combine prices from different suppliers. When quote_options are present, keep the row-level unit-price fields null rather than copying one supplier's offer into them. If a pricing is sold in a bulk/package amount, extract its package count as 'bulk_quantity', package amount including VAT as 'bulk_price_with_vat', and package amount excluding VAT as 'bulk_price_without_vat'. If the document gives a quote's unit price directly, preserve it as 'unit_price_with_vat' or 'unit_price_without_vat' inside that quote; do NOT divide a direct unit price by the row quantity. If the document says 'required N' or similar instead of using a quantity column, put N in 'quantity' and also preserve the source phrase in 'quantity_text'. If a row contains two or more quoted pricings, put every pricing in 'quote_options'. For each quote, use direct 'unit_price_with_vat'/'unit_price_without_vat' when printed; otherwise use 'bulk_quantity' with 'bulk_price_with_vat'/'bulk_price_without_vat' when a package total is printed. The verifier selects the lowest VAT-exclusive unit price when those quotes are available; otherwise it selects the lowest comparable VAT-inclusive unit price. For package quotes, compare package price divided by package quantity on the same VAT basis. It then calculates the row's total without VAT as item quantity times the selected VAT-exclusive unit price. Do not select or calculate OCR values yourself. Group nested pricing lines under the parent item. Extract VAT-inclusive and VAT-exclusive bottom-of-page grand totals as 'document_grand_total' and 'document_grand_total_without_vat'. Preserve visible written amounts even if mathematically wrong. NEVER fill blank printed fields or calculate OCR values yourself. If uncertain, output null for that value and add a short note in 'warnings'. Extract every item row; avoid summary/header rows.Return only strict JSON object of format {"rows":[{"item":"...","quantity":"50","quantity_text":null,"bulk_quantity":null,"bulk_price_with_vat":null,"bulk_price_without_vat":null,"unit_price_with_vat":null,"unit_price_without_vat":null,"document_total":null,"document_total_without_vat":null,"quote_options":[{"supplier":"Supplier A","unit_price_with_vat":"125.00","unit_price_without_vat":"100.00","bulk_quantity":null,"bulk_price_with_vat":null,"bulk_price_without_vat":null}],"warnings":[]}],"document_grand_total":"6625000.00","document_grand_total_without_vat":null,"warnings":[]}. Numeric strings contain no commas or currency symbols. A missing field must be null. No Markdown. OCR uncertainty should be flagged in warnings; do not invent unreadable digits. For every row, include boolean 'unit_price_with_vat_present': true only if the schedule visibly has a VAT-inclusive unit price and a value is printed for that item. If the schedule has only VAT-exclusive unit-price columns, set this to false and set unit_price_with_vat to null, even if a number appears elsewhere. Do not infer an inclusive amount from an exclusive amount."""
 
 async def recognize_image(image_bytes: bytes, api_key: str):
     endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"

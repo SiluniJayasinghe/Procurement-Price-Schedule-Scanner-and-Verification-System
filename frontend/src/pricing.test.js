@@ -118,3 +118,17 @@ test('lowering bulk quantity uses the selected VAT rate for inclusive prices', (
     document_total_without_vat: '40.00',
   });
 });
+
+test('typing the scanned value over a recalculated displayed value keeps it as an edit', () => {
+  const row = { quantity: '50', unit_price_with_vat: '16400.00', unit_price_without_vat: '13898.31', document_total: '820000.00' };
+  // Field displays 16400.01 (derived from 13898.31 x 1.18); user types 16400.0 then 16400.00.
+  const first = editPriceRow(row, 'unit_price_with_vat', '16400.0', null, '16400.01');
+  assert.deepEqual(first.edited_price_keys, ['unit_price_with_vat']);
+  const second = editPriceRow(first, 'unit_price_with_vat', '16400.00', null, '16400.0');
+  assert.deepEqual(second.edited_price_keys, ['unit_price_with_vat']);
+  assert.equal(second.unit_price_with_vat, '16400.00');
+  assert.equal(second.document_total, '820000.000');
+  // Re-entering the displayed (recalculated) value reverts to automatic.
+  const reverted = editPriceRow(second, 'unit_price_with_vat', '16400.01', null, '16400.00');
+  assert.equal(reverted.edited_price_keys, undefined);
+});
